@@ -1,0 +1,217 @@
+import os
+import numpy as np
+import pandas as pd
+
+import torch
+from torchvision import models, transforms
+from PIL import Image
+
+from sklearn.base import clone
+from sklearn.model_selection import StratifiedKFold, cross_validate, cross_val_predict
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC, LinearSVC
+from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier, VotingClassifier
+
+RANDOM_STATE = 1
+
+
+
+def extract_imagenet_features(meta_df, base_dir, cache_path):
+    """
+    Extract ImageNet pretrained ResNet18 features.
+    Uses cache so the slow CNN extraction only runs once.
+    """
+    if os.path.exists(cache_path):
+        print('Loading cached ImageNet features:', cache_path)
+        return pd.read_csv(cache_path)
+
+    print('Extracting ImageNet ResNet18 features. This may take a few minutes...')
+
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    weights = models.ResNet18_Weights.IMAGENET1K_V1
+    resnet = models.resnet18(weights=weights)
+    resnet.fc = torch.nn.Identity()     # remove final classification layer
+    resnet = resnet.to(device)
+    resnet.eval()
+
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
+        )
+    ])
+
+    all_features = []
+    image_ids = []
+
+    with torch.no_grad():
+        for i, row in meta_df.iterrows():
+            img_path = os.path.join(base_dir, row['image_path'])
+            img = Image.open(img_path).convert('RGB')
+            x = transform(img).unsqueeze(0).to(device)
+            feat = resnet(x).cpu().numpy().flatten()
+
+            all_features.append(feat)
+            image_ids.append(row['image_id'])
+
+            if (i + 1) % 200 == 0:
+                print('processed', i + 1, '/', len(meta_df))
+
+    arr = np.vstack(all_features)
+    feat_df = pd.DataFrame(arr, columns=[f'imgnet_{i}' for i in range(arr.shape[1])])
+    feat_df.insert(0, 'image_id', image_ids)
+    feat_df.to_csv(cache_path, index=False)
+    print('Saved ImageNet features:', cache_path)
+    return feat_df
+
+
+def load_task(base_dir):
+    train_meta = pd.read_csv(os.path.join(base_dir, 'train_metadata.csv'))
+    test_meta = pd.read_csv(os.path.join(base_dir, 'test_metadata.csv'))
+    color = pd.read_csv(os.path.join(base_dir, 'color_histogram.csv'))
+    hog = pd.read_csv(os.path.join(base_dir, 'hog_pca.csv'))
+    add = pd.read_csv(os.path.join(base_dir, 'additional_features.csv'))
+
+    # ImageNet ResNet18 features from raw images
+    all_meta = pd.concat([train_meta[['image_id', 'image_path']], test_meta[['image_id', 'image_path']]], ignore_index=True)
+    imagenet = extract_imagenet_features(
+        all_meta,
+        base_dir,
+        os.path.join(base_dir, 'imagenet_resnet18_features.csv')
+    )
+
+    hog_add = hog.merge(add, on='image_id')
+    all_basic = color.merge(hog, on='image_id').merge(add, on='image_id')
+
+    feature_sets = {
+        'color_only': color,
+        'hog_only': hog,
+        'add_only': add,
+        'color_hog': color.merge(hog, on='image_id'),
+        'color_add': color.merge(add, on='image_id'),
+        'hog_add': hog_add,
+        'all': all_basic,
+
+        # New stronger feature sets
+        'imagenet_only': imagenet,
+        'imagenet_hog_add': imagenet.merge(hog_add, on='image_id'),
+        'imagenet_all': imagenet.merge(all_basic, on='image_id'),
+    }
+    return train_meta, test_meta, feature_sets
+
+
+def make_xy(train_meta, test_meta, features):
+    train_df = train_meta.merge(features, on='image_id')
+    test_df = test_meta.merge(features, on='image_id')
+
+    drop_cols = ['image_id', 'image_path', 'class_id', 'class_name']
+    X = train_df.drop(columns=[c for c in drop_cols if c in train_df.columns])
+    y = train_df['class_id']
+    X_test = test_df.drop(columns=[c for c in drop_cols if c in test_df.columns])
+    return X, y, X_test, test_df['image_id']
+
+
+def get_models():
+    return {
+        'logistic_regression': Pipeline([
+            ('scaler', StandardScaler()),
+            ('clf', LogisticRegression(C=2, max_iter=5000, class_weight='balanced', random_state=RANDOM_STATE))
+        ]),
+        'linear_svm': Pipeline([
+            ('scaler', StandardScaler()),
+            ('clf', LinearSVC(C=0.3, class_weight='balanced', max_iter=20000, random_state=RANDOM_STATE))
+        ]),
+        'rbf_svm': Pipeline([
+            ('scaler', StandardScaler()),
+            ('clf', SVC(C=3, gamma='scale', kernel='rbf', class_weight='balanced', probability=True, random_state=RANDOM_STATE))
+        ]),
+        'random_forest': RandomForestClassifier(
+            n_estimators=500, max_features='sqrt', class_weight='balanced_subsample',
+            random_state=RANDOM_STATE, n_jobs=-1
+        ),
+        'extra_trees': ExtraTreesClassifier(
+            n_estimators=500, max_features='sqrt', class_weight='balanced',
+            random_state=RANDOM_STATE, n_jobs=-1
+        ),
+    }
+
+
+def compare_feature_sets(train_meta, test_meta, feature_sets):
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+    rows = []
+    for fs_name, features in feature_sets.items():
+        X, y, _, _ = make_xy(train_meta, test_meta, features)
+        for model_name, model in get_models().items():
+            scores = cross_validate(
+                model, X, y, cv=cv,
+                scoring=['accuracy', 'f1_macro'],
+                n_jobs=-1
+            )
+            rows.append({
+                'feature_set': fs_name,
+                'model': model_name,
+                'n_features': X.shape[1],
+                'acc_mean': scores['test_accuracy'].mean(),
+                'acc_std': scores['test_accuracy'].std(),
+                'f1_mean': scores['test_f1_macro'].mean(),
+                'f1_std': scores['test_f1_macro'].std(),
+            })
+    return pd.DataFrame(rows).sort_values(['f1_mean', 'acc_mean'], ascending=False).reset_index(drop=True)
+
+
+def error_analysis(train_meta, test_meta, features, model):
+    X, y, _, _ = make_xy(train_meta, test_meta, features)
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+    pred = cross_val_predict(model, X, y, cv=cv, n_jobs=-1)
+    print('CV accuracy:', round(accuracy_score(y, pred), 4))
+    print('CV macro F1:', round(f1_score(y, pred, average='macro'), 4))
+    print('\nClassification report:')
+    print(classification_report(y, pred, zero_division=0))
+    print('\nConfusion matrix:')
+    print(confusion_matrix(y, pred))
+
+
+def save_prediction(train_meta, test_meta, features, model, out_path):
+    X, y, X_test, test_ids = make_xy(train_meta, test_meta, features)
+    final_model = clone(model)
+    final_model.fit(X, y)
+    pred = final_model.predict(X_test)
+    sub = pd.DataFrame({'image_id': test_ids, 'class_id': pred})
+    sub.to_csv(out_path, index=False)
+    print('Saved:', out_path)
+
+
+def run_task(task_name, base_dir):
+    print('\n' + '=' * 80)
+    print(task_name)
+    print('=' * 80)
+    train_meta, test_meta, feature_sets = load_task(base_dir)
+
+    results = compare_feature_sets(train_meta, test_meta, feature_sets)
+    print(results.head(15))
+    results.to_csv(f'{task_name}_cv_results.csv', index=False)
+
+    best = results.iloc[0]
+    best_features = feature_sets[best['feature_set']]
+    best_model = get_models()[best['model']]
+
+    print('\nBest:', best['feature_set'], '+', best['model'])
+    error_analysis(train_meta, test_meta, best_features, best_model)
+    save_prediction(train_meta, test_meta, best_features, best_model, f'{task_name}_submission.csv')
+
+    return results
+
+
+if __name__ == '__main__':
+    # Change these two paths if your folders are somewhere else.
+    task1_dir = 'task1_data'
+    task2_dir = 'task2_data'
+
+    run_task('task1', task1_dir)
+    # run_task('task2', task2_dir)

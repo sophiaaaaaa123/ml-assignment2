@@ -59,15 +59,8 @@ cv5 = StratifiedKFold(n_splits=5, shuffle=True, random_state=1)
 
 # models used in task 1:
 pipelines = {
-    "Logistic L1 C=1 MI+PCA": Pipeline([
-        ("select", SelectKBest(mutual_info_classif, k=200)),
-        ("scaler", StandardScaler()),
-        ("pca", PCA(n_components=150)),
-        ("model", LogisticRegression(C=1, l1_ratio=1, solver="saga", max_iter=5000))
-    ]),
-
     "Logistic L1 C=10 MI+PCA": Pipeline([
-        ("select", SelectKBest(mutual_info_classif, k=200)),
+        ("select", SelectKBest(mutual_info_classif, k=150)),
         ("scaler", StandardScaler()),
         ("pca", PCA(n_components=150)),
         ("model", LogisticRegression(C=10, l1_ratio=1, solver="saga", max_iter=5000))
