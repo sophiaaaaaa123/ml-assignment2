@@ -74,14 +74,29 @@ def extract_imagenet_features(meta_df, base_dir, cache_path):
 
 
 def load_task(base_dir):
+    print("Loading from:", base_dir)
+    print("Files:", os.listdir(base_dir))
     train_meta = pd.read_csv(os.path.join(base_dir, 'train_metadata.csv'))
     test_meta = pd.read_csv(os.path.join(base_dir, 'test_metadata.csv'))
     color = pd.read_csv(os.path.join(base_dir, 'color_histogram.csv'))
     hog = pd.read_csv(os.path.join(base_dir, 'hog_pca.csv'))
     add = pd.read_csv(os.path.join(base_dir, 'additional_features.csv'))
 
+    class_map_path = os.path.join(base_dir, 'class_mapping.csv')
+    if os.path.exists(class_map_path):
+        class_map = pd.read_csv(class_map_path)
+        print("Loaded class_mapping.csv")
+    else:
+        class_map = None
+        print("No class_mapping.csv in this task")
+
+
     # ImageNet ResNet18 features from raw images
-    all_meta = pd.concat([train_meta[['image_id', 'image_path']], test_meta[['image_id', 'image_path']]], ignore_index=True)
+    all_meta = pd.concat(
+        [train_meta[['image_id', 'image_path']],
+         test_meta[['image_id', 'image_path']]],
+        ignore_index=True
+    )
     imagenet = extract_imagenet_features(
         all_meta,
         base_dir,
@@ -105,7 +120,7 @@ def load_task(base_dir):
         'imagenet_hog_add': imagenet.merge(hog_add, on='image_id'),
         'imagenet_all': imagenet.merge(all_basic, on='image_id'),
     }
-    return train_meta, test_meta, feature_sets
+    return train_meta, test_meta, feature_sets, class_map
 
 
 def make_xy(train_meta, test_meta, features):
@@ -167,28 +182,75 @@ def compare_feature_sets(train_meta, test_meta, feature_sets):
     return pd.DataFrame(rows).sort_values(['f1_mean', 'acc_mean'], ascending=False).reset_index(drop=True)
 
 
-def error_analysis(train_meta, test_meta, features, model, task_name, out_prefix):
+def error_analysis(train_meta, test_meta, features, model, task_name, out_prefix, class_map=None):
     X, y, _, _ = make_xy(train_meta, test_meta, features)
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+
+    cv = StratifiedKFold(
+        n_splits=5,
+        shuffle=True,
+        random_state=RANDOM_STATE
+    )
 
     pred = cross_val_predict(model, X, y, cv=cv, n_jobs=-1)
 
     acc = accuracy_score(y, pred)
     f1 = f1_score(y, pred, average='macro')
-    report = classification_report(y, pred, zero_division=0, output_dict=True)
-    cm = confusion_matrix(y, pred)
+
+    labels = sorted(y.unique())
+
+    # Use real class names if class_mapping.csv exists
+    if class_map is not None:
+        id_col = 'class_id'
+        name_col = [c for c in class_map.columns if c != 'class_id'][0]
+        id_to_name = dict(zip(class_map[id_col], class_map[name_col]))
+        target_names = [id_to_name[i] for i in labels]
+
+    else:
+        target_names = [str(i) for i in labels]
 
     print('CV accuracy:', round(acc, 4))
     print('CV macro F1:', round(f1, 4))
 
-    pd.DataFrame(report).T.to_csv(f'{out_prefix}_classification_report.csv')
-    pd.DataFrame(cm).to_csv(f'{out_prefix}_confusion_matrix.csv', index=False)
+    print('\nClass labels:')
+    for class_id, name in zip(labels, target_names):
+        print(class_id, '=', name)
 
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+    report = classification_report(
+        y,
+        pred,
+        labels=labels,
+        target_names=target_names,
+        zero_division=0,
+        output_dict=True
+    )
+
+    cm = confusion_matrix(y, pred, labels=labels)
+
+    pd.DataFrame(report).T.to_csv(
+        f'{out_prefix}_classification_report.csv'
+    )
+
+    pd.DataFrame(
+        cm,
+        index=target_names,
+        columns=target_names
+    ).to_csv(f'{out_prefix}_confusion_matrix.csv')
+
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(
+        cm,
+        annot=True,
+        fmt='d',
+        cmap='Blues',
+        xticklabels=target_names,
+        yticklabels=target_names
+    )
+
     plt.title(f'{task_name} Confusion Matrix')
     plt.xlabel('Predicted label')
     plt.ylabel('True label')
+    plt.xticks(rotation=45, ha='right')
+    plt.yticks(rotation=0)
     plt.tight_layout()
     plt.savefig(f'{out_prefix}_confusion_matrix.png', dpi=300)
     plt.close()
@@ -208,7 +270,7 @@ def run_task(task_name, base_dir):
     print('\n' + '=' * 80)
     print(task_name)
     print('=' * 80)
-    train_meta, test_meta, feature_sets = load_task(base_dir)
+    train_meta, test_meta, feature_sets, class_map = load_task(base_dir)
 
     results = compare_feature_sets(train_meta, test_meta, feature_sets)
     print(results.head(15))
@@ -219,7 +281,7 @@ def run_task(task_name, base_dir):
     best_model = get_models()[best['model']]
 
     print('\nBest:', best['feature_set'], '+', best['model'])
-    error_analysis(train_meta, test_meta, best_features, best_model, task_name, task_name)
+    error_analysis(train_meta, test_meta, best_features, best_model, task_name, task_name, class_map)
     save_prediction(train_meta, test_meta, best_features, best_model, f'{task_name}_submission.csv')
 
     return results
@@ -244,5 +306,5 @@ if __name__ == '__main__':
     task1_dir = 'task1_data'
     task2_dir = 'task2_data'
 
-    run_task('task1', task1_dir)
+    # run_task('task1', task1_dir)
     run_task('task2', task2_dir)
