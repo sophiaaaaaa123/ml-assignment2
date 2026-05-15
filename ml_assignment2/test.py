@@ -4,8 +4,10 @@ import pandas as pd
 
 import torch
 from torchvision import models, transforms
-from PIL import Image
 
+from PIL import Image
+import matplotlib.pyplot as plt
+import seaborn as sns
 from sklearn.base import clone
 from sklearn.model_selection import StratifiedKFold, cross_validate, cross_val_predict
 from sklearn.pipeline import Pipeline
@@ -165,16 +167,31 @@ def compare_feature_sets(train_meta, test_meta, feature_sets):
     return pd.DataFrame(rows).sort_values(['f1_mean', 'acc_mean'], ascending=False).reset_index(drop=True)
 
 
-def error_analysis(train_meta, test_meta, features, model):
+def error_analysis(train_meta, test_meta, features, model, task_name, out_prefix):
     X, y, _, _ = make_xy(train_meta, test_meta, features)
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+
     pred = cross_val_predict(model, X, y, cv=cv, n_jobs=-1)
-    print('CV accuracy:', round(accuracy_score(y, pred), 4))
-    print('CV macro F1:', round(f1_score(y, pred, average='macro'), 4))
-    print('\nClassification report:')
-    print(classification_report(y, pred, zero_division=0))
-    print('\nConfusion matrix:')
-    print(confusion_matrix(y, pred))
+
+    acc = accuracy_score(y, pred)
+    f1 = f1_score(y, pred, average='macro')
+    report = classification_report(y, pred, zero_division=0, output_dict=True)
+    cm = confusion_matrix(y, pred)
+
+    print('CV accuracy:', round(acc, 4))
+    print('CV macro F1:', round(f1, 4))
+
+    pd.DataFrame(report).T.to_csv(f'{out_prefix}_classification_report.csv')
+    pd.DataFrame(cm).to_csv(f'{out_prefix}_confusion_matrix.csv', index=False)
+
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+    plt.title(f'{task_name} Confusion Matrix')
+    plt.xlabel('Predicted label')
+    plt.ylabel('True label')
+    plt.tight_layout()
+    plt.savefig(f'{out_prefix}_confusion_matrix.png', dpi=300)
+    plt.close()
 
 
 def save_prediction(train_meta, test_meta, features, model, out_path):
@@ -202,10 +219,24 @@ def run_task(task_name, base_dir):
     best_model = get_models()[best['model']]
 
     print('\nBest:', best['feature_set'], '+', best['model'])
-    error_analysis(train_meta, test_meta, best_features, best_model)
+    error_analysis(train_meta, test_meta, best_features, best_model, task_name, task_name)
     save_prediction(train_meta, test_meta, best_features, best_model, f'{task_name}_submission.csv')
 
     return results
+
+
+def save_confused_pairs(cm, out_path):
+    rows = []
+    for true_label in range(cm.shape[0]):
+        for pred_label in range(cm.shape[1]):
+            if true_label != pred_label and cm[true_label, pred_label] > 0:
+                rows.append({
+                    'true_label': true_label,
+                    'predicted_label': pred_label,
+                    'count': cm[true_label, pred_label]
+                })
+
+    pd.DataFrame(rows).sort_values('count', ascending=False).to_csv(out_path, index=False)
 
 
 if __name__ == '__main__':
@@ -214,4 +245,4 @@ if __name__ == '__main__':
     task2_dir = 'task2_data'
 
     run_task('task1', task1_dir)
-    # run_task('task2', task2_dir)
+    run_task('task2', task2_dir)
