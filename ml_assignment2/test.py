@@ -16,6 +16,7 @@ from sklearn.metrics import accuracy_score, f1_score, classification_report, con
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC, LinearSVC
 from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier, VotingClassifier
+from itertools import combinations
 
 RANDOM_STATE = 1
 
@@ -103,23 +104,22 @@ def load_task(base_dir):
         os.path.join(base_dir, 'imagenet_resnet18_features.csv')
     )
 
-    hog_add = hog.merge(add, on='image_id')
-    all_basic = color.merge(hog, on='image_id').merge(add, on='image_id')
-
-    feature_sets = {
-        'color_only': color,
-        'hog_only': hog,
-        'add_only': add,
-        'color_hog': color.merge(hog, on='image_id'),
-        'color_add': color.merge(add, on='image_id'),
-        'hog_add': hog_add,
-        'all': all_basic,
-
-        # New stronger feature sets
-        'imagenet_only': imagenet,
-        'imagenet_hog_add': imagenet.merge(hog_add, on='image_id'),
-        'imagenet_all': imagenet.merge(all_basic, on='image_id'),
+    base_features = {
+        'color': color,
+        'hog': hog,
+        'add': add,
+        'imagenet': imagenet,
     }
+
+    feature_sets = {}
+
+    for r in range(1, len(base_features) + 1):
+        for names in combinations(base_features.keys(), r):
+            merged = base_features[names[0]]
+            for name in names[1:]:
+                merged = merged.merge(base_features[name], on='image_id')
+            feature_sets['_'.join(names)] = merged
+    
     return train_meta, test_meta, feature_sets, class_map
 
 
@@ -306,5 +306,5 @@ if __name__ == '__main__':
     task1_dir = 'task1_data'
     task2_dir = 'task2_data'
 
-    # run_task('task1', task1_dir)
-    run_task('task2', task2_dir)
+    run_task('task1', task1_dir)
+    # run_task('task2', task2_dir)
