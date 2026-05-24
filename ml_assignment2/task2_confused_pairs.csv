@@ -1,0 +1,12 @@
+true_class,predicted_class,count,pct_of_true_class
+Herring_Gull,Ring_billed_Gull,8,0.23529411764705882
+House_Sparrow,Song_Sparrow,7,0.21212121212121213
+Ring_billed_Gull,Herring_Gull,6,0.18181818181818182
+Wilson_Warbler,Yellow_Warbler,6,0.17647058823529413
+Yellow_Warbler,Wilson_Warbler,6,0.17647058823529413
+Blue_Jay,Cardinal,1,0.029411764705882353
+Cardinal,Song_Sparrow,1,0.03225806451612903
+Red_winged_Blackbird,House_Sparrow,1,0.030303030303030304
+Song_Sparrow,Cardinal,1,0.029411764705882353
+Song_Sparrow,House_Sparrow,1,0.029411764705882353
+Yellow_Warbler,Cardinal,1,0.029411764705882353
